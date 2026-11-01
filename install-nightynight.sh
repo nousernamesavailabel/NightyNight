@@ -11,6 +11,47 @@ done
 [[ -r /etc/os-release ]] || exit 1
 source /etc/os-release
 case "$ID" in ubuntu|debian|fedora|rhel|rocky|almalinux|ol|centos) :;; *) echo "Unsupported OS: $ID" >&2; exit 1;; esac
+# Timezone selection is optional. It changes the HOST timezone, not just NightyNight.
+# Non-interactive installs keep the existing timezone unless NIGHTYNIGHT_TIMEZONE is set.
+# NIGHTYNIGHT_TIMEZONE=keep (default), UTC, America/Anchorage, or another IANA zone.
+choose_timezone() {
+  local current choice requested
+  current=$(timedatectl show --property=Timezone --value 2>/dev/null || true)
+  current=${current:-unknown}
+  requested=${NIGHTYNIGHT_TIMEZONE:-keep}
+  if [[ ! -v NIGHTYNIGHT_TIMEZONE && -t 0 ]]; then
+    printf '\nServer timezone is currently: %s\n' "$current"
+    printf 'Timezone selection (affects the entire server):\n'
+    printf '  1) Keep existing timezone [default]\n'
+    printf '  2) America/Anchorage (Alaska)\n'
+    printf '  3) UTC\n'
+    printf '  4) Enter another IANA timezone\n'
+    read -r -p 'Choose [1-4]: ' choice || choice=1
+    case "${choice:-1}" in
+      1) requested=keep ;;
+      2) requested=America/Anchorage ;;
+      3) requested=UTC ;;
+      4) read -r -p 'Enter timezone (e.g. America/Chicago): ' requested ;;
+      *) echo 'Invalid timezone selection; no changes made.' >&2; exit 1 ;;
+    esac
+  fi
+  if [[ "$requested" == keep ]]; then
+    echo "Keeping server timezone: $current"
+    return 0
+  fi
+  command -v timedatectl >/dev/null || { echo 'timedatectl is required to change timezone.' >&2; exit 1; }
+  # Use systemd's authoritative list; reject unknown timezone names.
+  if ! timedatectl list-timezones --no-pager | grep -Fxq -- "$requested"; then
+    echo "Invalid timezone: $requested (see timedatectl list-timezones)" >&2
+    exit 1
+  fi
+  if [[ "$requested" == "$current" ]]; then
+    echo "Server timezone already set to: $requested"
+  else
+    timedatectl set-timezone "$requested"
+    echo "Server timezone changed: $current -> $requested"
+  fi
+}
 # Require locally installed logrotate rather than silently invoking a package manager.
 command -v logrotate >/dev/null || { echo 'Install logrotate before proceeding.' >&2; exit 1; }
 CFG_DIR=/etc/nightynight
@@ -111,6 +152,7 @@ if [[ $DISABLE == true ]]; then
 else
   echo 'Native updater timers preserved (default). They may run independently of NightyNight.'
 fi
+choose_timezone
 systemctl daemon-reload
 systemctl enable --now nightynight.timer
 systemctl is-enabled --quiet nightynight.timer

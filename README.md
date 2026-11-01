@@ -30,6 +30,27 @@ sudo ./install-nightynight.sh
 
 The installer preserves the existing configuration, if any, and saves timestamped copies of existing managed files in `/var/backups/nightynight/`. It migrates the known legacy NightyNight cron entry and legacy logrotate rule to a systemd timer and a single logrotate policy. **It does not run a package update at installation time.** To modify the schedule, edit the config and rerun the installer from the same directory.
 
+### Timezone selection
+
+When launched interactively with `sudo ./install-nightynight.sh`, the installer asks whether to **keep the current server timezone** (the default), select **America/Anchorage**, select **UTC**, or enter another valid IANA timezone (e.g. `America/Chicago`). The selected timezone changes the **entire operating system**, including other local-time scheduled jobs and log timestamps; it is not a NightyNight-only setting. It does not change the underlying clock or require a reboot.
+
+For unattended installations (without an interactive terminal), the existing server timezone is preserved unless specified explicitly:
+
+```bash
+sudo env NIGHTYNIGHT_TIMEZONE=America/Anchorage ./install-nightynight.sh
+# Keep existing timezone explicitly:
+sudo env NIGHTYNIGHT_TIMEZONE=keep ./install-nightynight.sh
+```
+
+Check the current setting and the next NightyNight execution using:
+
+```bash
+timedatectl
+systemctl list-timers --all nightynight.timer
+```
+
+The timer uses local server time and adjusts for daylight saving transitions. Running the installer again defaults to keeping the then-current timezone. For servers where the local timezone should remain UTC, keep UTC and choose the appropriate patch window in `/etc/nightynight/nightynight.conf` instead.
+
 **Important:** This installer changes the scheduling mechanism from cron to systemd. It removes only known NightyNight cron references; review custom cron entries separately. By default it **does not disable** native APT/DNF automatic update services. If the server already runs native unattended updates, choose which automation should own patching before production deployment. If you explicitly set `DISABLE_NATIVE_UPDATERS=true`, the installer disables selected known update timers; other update mechanisms may still exist.
 
 ### First-time test
