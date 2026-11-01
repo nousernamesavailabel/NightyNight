@@ -32,9 +32,9 @@ The installer preserves the existing configuration, if any, and saves timestampe
 
 ### Timezone selection
 
-When launched interactively with `sudo ./install-nightynight.sh`, the installer asks whether to **keep the current server timezone** (the default), select **America/Anchorage**, select **UTC**, or enter another valid IANA timezone (e.g. `America/Chicago`). The selected timezone changes the **entire operating system**, including other local-time scheduled jobs and log timestamps; it is not a NightyNight-only setting. It does not change the underlying clock or require a reboot.
+When run from an interactive terminal (`sudo ./install-nightynight.sh`), the installer displays the current server timezone and offers **Keep existing** as the default. It also offers common US zones (Eastern, Central, Mountain, Arizona, Pacific, Alaska, Hawaii), UTC, and **Search all installed IANA timezones**. The search reads the host's live list from `timedatectl list-timezones`, matches city/region names case-insensitively, shows up to 30 results at a time, and accepts a numbered selection or an exact timezone name. Refine the search for larger result sets.
 
-For unattended installations (without an interactive terminal), the existing server timezone is preserved unless specified explicitly:
+For unattended installs the existing timezone is retained unless explicitly set:
 
 ```bash
 sudo env NIGHTYNIGHT_TIMEZONE=America/Anchorage ./install-nightynight.sh
@@ -42,14 +42,7 @@ sudo env NIGHTYNIGHT_TIMEZONE=America/Anchorage ./install-nightynight.sh
 sudo env NIGHTYNIGHT_TIMEZONE=keep ./install-nightynight.sh
 ```
 
-Check the current setting and the next NightyNight execution using:
-
-```bash
-timedatectl
-systemctl list-timers --all nightynight.timer
-```
-
-The timer uses local server time and adjusts for daylight saving transitions. Running the installer again defaults to keeping the then-current timezone. For servers where the local timezone should remain UTC, keep UTC and choose the appropriate patch window in `/etc/nightynight/nightynight.conf` instead.
+Timezone selections are validated against `timedatectl list-timezones` before applying. This changes the **whole server timezone**, including other local-time scheduled jobs and log timestamps—not only NightyNight. It does not alter the underlying clock or require a reboot. The systemd timer uses local server time and automatically accounts for DST. Running the installer again defaults to retaining the then-current timezone.
 
 **Important:** This installer changes the scheduling mechanism from cron to systemd. It removes only known NightyNight cron references; review custom cron entries separately. By default it **does not disable** native APT/DNF automatic update services. If the server already runs native unattended updates, choose which automation should own patching before production deployment. If you explicitly set `DISABLE_NATIVE_UPDATERS=true`, the installer disables selected known update timers; other update mechanisms may still exist.
 

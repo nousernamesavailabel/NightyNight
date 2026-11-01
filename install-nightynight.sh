@@ -11,37 +11,87 @@ done
 [[ -r /etc/os-release ]] || exit 1
 source /etc/os-release
 case "$ID" in ubuntu|debian|fedora|rhel|rocky|almalinux|ol|centos) :;; *) echo "Unsupported OS: $ID" >&2; exit 1;; esac
-# Timezone selection is optional. It changes the HOST timezone, not just NightyNight.
-# Non-interactive installs keep the existing timezone unless NIGHTYNIGHT_TIMEZONE is set.
-# NIGHTYNIGHT_TIMEZONE=keep (default), UTC, America/Anchorage, or another IANA zone.
+# Timezone selection is optional and changes the HOST timezone, not just NightyNight.
+# Non-interactive: NIGHTYNIGHT_TIMEZONE=keep (default) or an exact IANA timezone.
+# Interactive: current timezone, common US zones, and searchable system timezone list.
 choose_timezone() {
-  local current choice requested
+  local current requested choice search answer i limit
+  local -a zones matches
   current=$(timedatectl show --property=Timezone --value 2>/dev/null || true)
   current=${current:-unknown}
   requested=${NIGHTYNIGHT_TIMEZONE:-keep}
   if [[ ! -v NIGHTYNIGHT_TIMEZONE && -t 0 ]]; then
-    printf '\nServer timezone is currently: %s\n' "$current"
-    printf 'Timezone selection (affects the entire server):\n'
-    printf '  1) Keep existing timezone [default]\n'
-    printf '  2) America/Anchorage (Alaska)\n'
-    printf '  3) UTC\n'
-    printf '  4) Enter another IANA timezone\n'
-    read -r -p 'Choose [1-4]: ' choice || choice=1
-    case "${choice:-1}" in
-      1) requested=keep ;;
-      2) requested=America/Anchorage ;;
-      3) requested=UTC ;;
-      4) read -r -p 'Enter timezone (e.g. America/Chicago): ' requested ;;
-      *) echo 'Invalid timezone selection; no changes made.' >&2; exit 1 ;;
-    esac
+    command -v timedatectl >/dev/null || { echo 'timedatectl is required for timezone selection.' >&2; exit 1; }
+    mapfile -t zones < <(timedatectl list-timezones --no-pager 2>/dev/null)
+    ((${#zones[@]} > 0)) || { echo 'Could not load available timezones.' >&2; exit 1; }
+    while true; do
+      printf '\nCurrent server timezone: %s\n' "$current"
+      printf 'Timezone selection (changes timezone for the entire server):\n'
+      printf '  1) Keep current timezone [default]\n'
+      printf '  2) America/New_York (Eastern)\n'
+      printf '  3) America/Chicago (Central)\n'
+      printf '  4) America/Denver (Mountain)\n'
+      printf '  5) America/Phoenix (Arizona)\n'
+      printf '  6) America/Los_Angeles (Pacific)\n'
+      printf '  7) America/Anchorage (Alaska)\n'
+      printf '  8) Pacific/Honolulu (Hawaii)\n'
+      printf '  9) UTC\n'
+      printf ' 10) Search all installed IANA timezones\n'
+      read -r -p 'Choose [1-10, default 1]: ' choice || choice=1
+      case "${choice:-1}" in
+        1) requested=keep; break ;;
+        2) requested=America/New_York; break ;;
+        3) requested=America/Chicago; break ;;
+        4) requested=America/Denver; break ;;
+        5) requested=America/Phoenix; break ;;
+        6) requested=America/Los_Angeles; break ;;
+        7) requested=America/Anchorage; break ;;
+        8) requested=Pacific/Honolulu; break ;;
+        9) requested=UTC; break ;;
+        10)
+          while true; do
+            read -r -p 'Search by city/region (or enter exact timezone, blank to return): ' search || search=''
+            [[ -n $search ]] || break
+            matches=()
+            for answer in "${zones[@]}"; do
+              if [[ ${answer,,} == *${search,,}* ]]; then
+                matches+=("$answer")
+              fi
+            done
+            if ((${#matches[@]} == 0)); then
+              echo 'No matching timezones. Try another search.'
+              continue
+            fi
+            limit=${#matches[@]}
+            (( limit > 30 )) && limit=30
+            printf '%s matches (showing %s; refine search for more):\n' "${#matches[@]}" "$limit"
+            for ((i=0; i<limit; i++)); do
+              printf ' %2d) %s\n' "$((i+1))" "${matches[i]}"
+            done
+            read -r -p 'Enter number, exact IANA name, or R to search again: ' answer || answer=R
+            if [[ $answer =~ ^[0-9]+$ ]] && ((10#$answer >= 1 && 10#$answer <= limit)); then
+              requested=${matches[10#$answer-1]}
+              break 2
+            elif [[ $answer == [Rr] || -z $answer ]]; then
+              continue
+            elif printf '%s\n' "${zones[@]}" | grep -Fx -- "$answer" >/dev/null; then
+              requested=$answer
+              break 2
+            else
+              echo 'Invalid selection. Search again.'
+            fi
+          done
+          ;;
+        *) echo 'Invalid selection. Try again.' ;;
+      esac
+    done
   fi
   if [[ "$requested" == keep ]]; then
     echo "Keeping server timezone: $current"
     return 0
   fi
   command -v timedatectl >/dev/null || { echo 'timedatectl is required to change timezone.' >&2; exit 1; }
-  # Use systemd's authoritative list; reject unknown timezone names.
-  if ! timedatectl list-timezones --no-pager | grep -Fxq -- "$requested"; then
+  if ! timedatectl list-timezones --no-pager | grep -Fx -- "$requested" >/dev/null; then
     echo "Invalid timezone: $requested (see timedatectl list-timezones)" >&2
     exit 1
   fi
