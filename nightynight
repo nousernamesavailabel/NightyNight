@@ -186,12 +186,14 @@ elif command -v dnf5 >/dev/null 2>&1; then
   rc=0; dnf5 needs-restarting >/dev/null 2>&1 || rc=$?
   case "$rc" in 0) REBOOT=false;; 1) REBOOT=true;; *) REBOOT=unknown; echo "WARNING: reboot assessment failed ($rc)";; esac
   SERVICES='See: dnf5 needs-restarting --services'
-elif command -v needs-restarting >/dev/null 2>&1; then
-  rc=0; needs-restarting -r >/dev/null 2>&1 || rc=$?
-  case "$rc" in 0) REBOOT=false;; 1) REBOOT=true;; *) REBOOT=unknown; echo "WARNING: reboot assessment failed ($rc)";; esac
-  SERVICES='See: needs-restarting -s'
+elif command -v dnf >/dev/null 2>&1; then
+  # RHEL/Rocky/Alma/Oracle with DNF4 often expose needs-restarting as a
+  # DNF subcommand even when the standalone binary is not installed.
+  rc=0; dnf needs-restarting -r >/dev/null 2>&1 || rc=$?
+  case "$rc" in 0) REBOOT=false;; 1) REBOOT=true;; *) REBOOT=unknown; echo "WARNING: DNF reboot assessment failed ($rc)";; esac
+  SERVICES='See: dnf needs-restarting -s'
 else
-  REBOOT=unknown; SERVICES='needs-restarting unavailable'
+  REBOOT=unknown; SERVICES='DNF reboot detection unavailable'
   echo 'WARNING: reboot detection unavailable on this host'
 fi
 [[ $REBOOT != unknown ]] || fail 7 'Reboot status could not be determined'

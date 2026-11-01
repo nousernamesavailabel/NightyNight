@@ -15,7 +15,7 @@ Automated nightly Linux package patching for Ubuntu, Debian, Fedora, RHEL, Rocky
 
 - Root access, Bash, systemd, `flock` (util-linux), GNU `timeout` (coreutils), `logrotate`, `df`, and the distribution's APT or DNF package manager.
 - Network access to the enabled package repositories and sufficient disk space.
-- For DNF4 reboot detection, install the package providing `needs-restarting` (often `dnf-utils` or `dnf-plugins-core`); Fedora DNF5 provides `dnf5 needs-restarting`.
+- DNF4 reboot detection uses `dnf needs-restarting -r` (no standalone executable required when the DNF subcommand is available); Fedora DNF5 uses `dnf5 needs-restarting`.
 - For optional email notifications, configure a functioning local `mail` command and a mail transport. No SMTP credentials are stored by NightyNight.
 - On APT systems, the `APT::Update::Error-Mode=any` behavior requires a suitably recent apt (supported by modern Ubuntu/Debian versions).
 
@@ -108,7 +108,7 @@ Settings are plain `KEY=value` lines; **do not use shell quotes, variable expans
 - **DNF4/DNF5:** `dnf upgrade --refresh` without `--allowerasing` avoids enabling dependency-resolution erasures. The package manager may replace old package versions normally. Exclusions use `--exclude` patterns.
 - **Offline Fedora updates:** a DNF5 offline transaction that is present, invalid or cannot be confidently classified causes a **skip**, never an automatic clean. Run `sudo dnf offline status` and address it manually (`sudo dnf offline clean` only after deciding it is safe).
 - **Concurrency:** NightyNight uses `/run/nightynight.lock` to prevent overlapping NightyNight executions. Native package manager locks still protect against unrelated tools; consider disabling competing automation only after reviewing the host.
-- **Reboots:** no automatic reboot. APT uses `/run/reboot-required`; DNF5 uses `dnf5 needs-restarting`; DNF4 uses `needs-restarting -r`. An unavailable or failed reboot check is treated as an error even if package installation succeeded.
+- **Reboots:** no automatic reboot. APT uses `/run/reboot-required`; DNF5 uses `dnf5 needs-restarting`; DNF4 uses `dnf needs-restarting -r`. An unavailable or failed reboot check is treated as an error even if package installation succeeded.
 - **Service restarts:** package maintainer scripts may restart services during installation. NightyNight reports how to inspect services needing restart; it does not separately restart them.
 - **Dry run:** APT uses `apt-get -s`; DNF uses `--assumeno`. No packages are installed by these modes, but repository metadata or caches may be updated. Dry-run exit status does not guarantee the next real transaction will behave identically.
 - **Disk check:** current disk preflight is deliberately basic and not a guarantee of sufficient space for a large transaction.
@@ -135,9 +135,9 @@ The structured status file `/var/lib/nightynight/status.json` records timestamps
 sudo dnf5 needs-restarting
 sudo dnf5 needs-restarting --services
 
-# RHEL-family / DNF4 (if needs-restarting is installed)
-sudo needs-restarting -r
-sudo needs-restarting -s
+# RHEL-family / DNF4
+sudo dnf needs-restarting -r
+sudo dnf needs-restarting -s
 
 # Debian/Ubuntu
 test -f /run/reboot-required && echo 'Reboot required' || echo 'No reboot required'
