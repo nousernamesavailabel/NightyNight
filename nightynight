@@ -1,0 +1,200 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 027
+CONFIG=/etc/nightynight/nightynight.conf
+STATE_DIR=/var/lib/nightynight
+LOG=/var/log/nightly-patch.log
+STATUS=$STATE_DIR/status.json
+LOCK=/run/nightynight.lock
+
+usage() { echo 'Usage: nightynight {run|dry-run|status|check-config}'; }
+[[ ${1:-} =~ ^(run|dry-run|status|check-config)$ ]] || { usage; exit 64; }
+ACTION=$1
+if [[ $ACTION == status ]]; then
+  if [[ -r $STATUS ]]; then cat "$STATUS"; else echo 'No NightyNight status recorded.'; exit 1; fi
+  exit 0
+fi
+[[ $EUID -eq 0 ]] || { echo 'ERROR: run as root (sudo).' >&2; exit 64; }
+[[ -f $CONFIG ]] || { echo "Missing config: $CONFIG" >&2; exit 3; }
+
+# Strict allowlisted key/value parser. Do not source mutable configuration.
+declare -A cfg
+while IFS= read -r ln || [[ -n $ln ]]; do
+  ln=${ln%$'\r'}
+  [[ $ln =~ ^[[:space:]]*(#|$) ]] && continue
+  [[ $ln =~ ^([A-Z_]+)=(.*)$ ]] || { echo "Invalid config line: $ln" >&2; exit 3; }
+  k=${BASH_REMATCH[1]}; v=${BASH_REMATCH[2]}
+  case "$k" in
+    PATCH_HOUR|PATCH_MINUTE|RANDOM_DELAY_MINUTES|PERSISTENT_TIMER|MIN_FREE_SPACE_MB|MAX_RUNTIME_MINUTES|UPDATE_MODE|EXCLUDE_PACKAGES|EXCLUDE_KERNEL|ALLOW_PACKAGE_REMOVALS|CHECK_OFFLINE_UPDATES|AUTO_REBOOT|LOG_RETENTION_DAYS|NOTIFY_ON_FAILURE|NOTIFY_ON_REBOOT|NOTIFY_EMAIL|DISABLE_NATIVE_UPDATERS) cfg[$k]=$v ;;
+    *) echo "Unknown config key: $k" >&2; exit 3 ;;
+  esac
+done < "$CONFIG"
+get() { printf '%s' "${cfg[$1]:-$2}"; }
+boolean() { [[ $1 == true || $1 == false ]]; }
+number() { [[ $1 =~ ^[0-9]+$ ]]; }
+for k in PATCH_HOUR PATCH_MINUTE RANDOM_DELAY_MINUTES MIN_FREE_SPACE_MB MAX_RUNTIME_MINUTES LOG_RETENTION_DAYS; do
+  v=$(get "$k" 0); number "$v" || { echo "Invalid number: $k=$v" >&2; exit 3; }
+done
+(( 10#$(get PATCH_HOUR 3) <= 23 && 10#$(get PATCH_MINUTE 0) <= 59 )) || { echo 'Invalid scheduled hour/minute' >&2; exit 3; }
+(( $(get MIN_FREE_SPACE_MB 2048) > 0 && $(get MAX_RUNTIME_MINUTES 120) > 0 )) || { echo 'Invalid disk space/timeout' >&2; exit 3; }
+for k in PERSISTENT_TIMER EXCLUDE_KERNEL ALLOW_PACKAGE_REMOVALS CHECK_OFFLINE_UPDATES AUTO_REBOOT NOTIFY_ON_FAILURE NOTIFY_ON_REBOOT DISABLE_NATIVE_UPDATERS; do
+  v=$(get "$k" false); boolean "$v" || { echo "Invalid boolean: $k=$v" >&2; exit 3; }
+done
+[[ $(get AUTO_REBOOT false) == false ]] || { echo 'Automatic reboot is intentionally unsupported.' >&2; exit 3; }
+[[ $(get UPDATE_MODE all) == all || $(get UPDATE_MODE all) == security ]] || { echo 'UPDATE_MODE must be all or security' >&2; exit 3; }
+if [[ $(get UPDATE_MODE all) == security ]]; then
+  echo 'Security-only mode is not supported consistently across APT and all DNF repositories; use all.' >&2
+  exit 3
+fi
+[[ $(get ALLOW_PACKAGE_REMOVALS false) == false ]] || { echo 'ALLOW_PACKAGE_REMOVALS=true is not supported in v2.' >&2; exit 3; }
+if [[ $ACTION == check-config ]]; then echo 'Configuration OK'; exit 0; fi
+
+mkdir -p "$STATE_DIR"
+chmod 700 "$STATE_DIR"
+exec 9>"$LOCK"
+if ! flock -n 9; then echo 'NightyNight already running'; exit 5; fi
+# Preserve existing log from prior versions.
+touch "$LOG"
+chmod 640 "$LOG"
+exec >>"$LOG" 2>&1
+MODE=$ACTION
+STARTED=$(date --iso-8601=seconds)
+HOST=$(hostname -s)
+RESULT=failure
+REASON='Unexpected failure'
+REBOOT=unknown
+SERVICES=unknown
+PKG_MANAGER=unknown
+OS_ID=unknown
+EXIT=4
+trap 'finish $?' EXIT
+json_escape() { local s=${1//\\/\\\\}; s=${s//\"/\\\"}; s=${s//$'\n'/\\n}; s=${s//$'\r'/\\r}; printf '%s' "$s"; }
+notify() {
+  local event=$1
+  local enabled=false
+  [[ $event == failure ]] && enabled=$(get NOTIFY_ON_FAILURE false)
+  [[ $event == reboot ]] && enabled=$(get NOTIFY_ON_REBOOT false)
+  [[ $enabled == true ]] || return 0
+  local addr; addr=$(get NOTIFY_EMAIL '')
+  [[ -n $addr ]] || { echo 'Notification requested but NOTIFY_EMAIL is empty'; return 0; }
+  if command -v mail >/dev/null 2>&1; then
+    printf 'Host: %s\nResult: %s\nReason: %s\nReboot: %s\nLog: %s\n' "$HOST" "$RESULT" "$REASON" "$REBOOT" "$LOG" | mail -s "NightyNight $event: $HOST" "$addr" || echo 'WARNING: email notification failed'
+  else echo 'WARNING: mail command unavailable; notification not sent'; fi
+}
+finish() {
+  local rc=$1
+  trap - EXIT
+  if (( rc == 0 )) && [[ $RESULT != skipped ]]; then RESULT=success; REASON='Completed'; fi
+  if [[ $RESULT == skipped ]]; then rc=2; fi
+  [[ $RESULT == skipped || $rc -eq 0 ]] || RESULT=failure
+  local ended tmp
+  ended=$(date --iso-8601=seconds)
+  tmp=$(mktemp "$STATE_DIR/.status.XXXXXX")
+  printf '{\n  "hostname": "%s",\n  "os": "%s",\n  "package_manager": "%s",\n  "mode": "%s",\n  "started_at": "%s",\n  "finished_at": "%s",\n  "result": "%s",\n  "reason": "%s",\n  "exit_code": %d,\n  "reboot_required": "%s",\n  "services_needing_restart": "%s"\n}\n' \
+   "$(json_escape "$HOST")" "$(json_escape "$OS_ID")" "$(json_escape "$PKG_MANAGER")" "$MODE" "$STARTED" "$ended" "$RESULT" "$(json_escape "$REASON")" "$rc" "$REBOOT" "$(json_escape "$SERVICES")" > "$tmp"
+  chmod 600 "$tmp"; mv -f "$tmp" "$STATUS"
+  echo "Finished $ended; result $RESULT; exit code $rc; reason: $REASON"
+  if [[ $RESULT == failure ]]; then notify failure; elif [[ $RESULT == success && $REBOOT == true ]]; then notify reboot; fi
+  exit "$rc"
+}
+fail() { local code=$1; shift; REASON=$*; echo "ERROR: $REASON"; exit "$code"; }
+skip() { REASON=$*; RESULT=skipped; echo "SKIPPED: $REASON"; exit 2; }
+source /etc/os-release
+OS_ID=$ID
+case "$ID" in
+  ubuntu|debian) PKG_MANAGER=apt ;;
+  fedora|rhel|rocky|almalinux|ol|centos) PKG_MANAGER=dnf ;;
+  *) fail 3 "Unsupported OS: $ID" ;;
+esac
+printf '\n===== NightyNight %s %s on %s (%s) =====\n' "$MODE" "$STARTED" "$HOST" "$OS_ID"
+FREE_KB=$(df -Pk / | awk 'NR==2 {print $4}')
+[[ $FREE_KB =~ ^[0-9]+$ ]] || fail 3 'Could not determine free disk space'
+(( FREE_KB >= $(get MIN_FREE_SPACE_MB 2048) * 1024 )) || fail 3 "Insufficient free space on /: ${FREE_KB} KB available"
+
+if [[ $PKG_MANAGER == dnf && $(get CHECK_OFFLINE_UPDATES true) == true ]] && command -v dnf5 >/dev/null 2>&1; then
+  tmp_status=$(mktemp)
+  if ! dnf5 offline status >"$tmp_status" 2>&1; then
+    s=$(cat "$tmp_status"); rm -f "$tmp_status"
+    # Some DNF5 versions return a nonzero exit for an absent transaction.
+    if [[ $s != *'No offline transaction is stored'* ]]; then skip "DNF5 offline transaction status inconclusive: $s"; fi
+  else
+    s=$(cat "$tmp_status"); rm -f "$tmp_status"
+    if [[ $s != *'No offline transaction is stored'* ]]; then skip "DNF5 offline transaction present: $s"; fi
+  fi
+fi
+
+# Package exclusions. For APT create a temporary preferences file without changing system policies.
+read -r -a patterns <<< "$(get EXCLUDE_PACKAGES '')"
+if [[ $(get EXCLUDE_KERNEL false) == true ]]; then
+  if [[ $PKG_MANAGER == apt ]]; then patterns+=( 'linux-*' ); else patterns+=( 'kernel*' 'linux-firmware*' ); fi
+fi
+clean_tmp() { [[ -z ${APT_PREF:-} ]] || rm -f "$APT_PREF"; }
+trap 'rc=$?; clean_tmp; finish "$rc"' EXIT
+
+run_cmd() {
+  local rc=0
+  timeout --signal=TERM --kill-after=60s "$(get MAX_RUNTIME_MINUTES 120)m" "$@" || rc=$?
+  (( rc == 0 )) && return 0
+  (( rc == 124 || rc == 137 )) && fail 8 "Package operation timed out (exit $rc)"
+  fail 4 "Package command failed (exit $rc): $*"
+}
+if [[ $PKG_MANAGER == apt ]]; then
+  command -v apt-get >/dev/null || fail 3 'apt-get not found'
+  APT_ARGS=()
+  if (( ${#patterns[@]} )); then
+    APT_PREF=$(mktemp /run/nightynight-apt-preferences.XXXXXX)
+    [[ ! -f /etc/apt/preferences ]] || cat /etc/apt/preferences >> "$APT_PREF"
+    for pat in "${patterns[@]}"; do
+      [[ $pat =~ ^[A-Za-z0-9._+*?~:-]+$ ]] || fail 3 "Invalid exclusion glob: $pat"
+      printf '\nPackage: %s\nPin: version *\nPin-Priority: -1\n' "$pat" >> "$APT_PREF"
+    done
+    APT_ARGS+=( -o "Dir::Etc::preferences=$APT_PREF" )
+  fi
+  export DEBIAN_FRONTEND=noninteractive
+  if [[ $MODE == run ]]; then
+    run_cmd apt-get "${APT_ARGS[@]}" update -o APT::Update::Error-Mode=any
+    run_cmd apt-get "${APT_ARGS[@]}" -y --no-remove -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold upgrade --with-new-pkgs
+  else
+    # Dry-run does not refresh repository metadata or install packages.
+    run_cmd apt-get "${APT_ARGS[@]}" -s --no-remove upgrade --with-new-pkgs
+  fi
+else
+  command -v dnf >/dev/null || fail 3 'dnf not found'
+  DNF_ARGS=( upgrade --refresh )
+  for pat in "${patterns[@]}"; do
+    [[ $pat =~ ^[A-Za-z0-9._+*?~:-]+$ ]] || fail 3 "Invalid exclusion glob: $pat"
+    DNF_ARGS+=( --exclude="$pat" )
+  done
+  if [[ $MODE == run ]]; then
+    # Both DNF4 and DNF5 require explicit --allowerasing for solver erasures.
+    run_cmd dnf -y "${DNF_ARGS[@]}"
+  else
+    # --assumeno plans a transaction without applying it; DNF may return 1 for declined changes.
+    rc=0
+    timeout --signal=TERM --kill-after=60s "$(get MAX_RUNTIME_MINUTES 120)m" dnf --assumeno "${DNF_ARGS[@]}" || rc=$?
+    (( rc == 0 || rc == 1 )) || fail 4 "DNF dry run failed (exit $rc)"
+    echo 'DNF dry-run only: no transaction applied.'
+  fi
+fi
+
+# Check reboot and services even after dry-run, for current system state.
+if [[ $PKG_MANAGER == apt ]]; then
+  if [[ -f /run/reboot-required ]]; then REBOOT=true; else REBOOT=false; fi
+  if command -v needrestart >/dev/null 2>&1; then SERVICES='Use needrestart for service assessment'; else SERVICES='needrestart unavailable'; fi
+elif command -v dnf5 >/dev/null 2>&1; then
+  rc=0; dnf5 needs-restarting >/dev/null 2>&1 || rc=$?
+  case "$rc" in 0) REBOOT=false;; 1) REBOOT=true;; *) REBOOT=unknown; echo "WARNING: reboot assessment failed ($rc)";; esac
+  SERVICES='See: dnf5 needs-restarting --services'
+elif command -v needs-restarting >/dev/null 2>&1; then
+  rc=0; needs-restarting -r >/dev/null 2>&1 || rc=$?
+  case "$rc" in 0) REBOOT=false;; 1) REBOOT=true;; *) REBOOT=unknown; echo "WARNING: reboot assessment failed ($rc)";; esac
+  SERVICES='See: needs-restarting -s'
+else
+  REBOOT=unknown; SERVICES='needs-restarting unavailable'
+  echo 'WARNING: reboot detection unavailable on this host'
+fi
+[[ $REBOOT != unknown ]] || fail 7 'Reboot status could not be determined'
+[[ $REBOOT != true ]] || echo 'REBOOT REQUIRED (no automatic reboot)'
+RESULT=success
+REASON='Completed'
+exit 0
