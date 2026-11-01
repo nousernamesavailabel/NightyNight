@@ -2,6 +2,20 @@
 
 Automated nightly Linux package patching for Ubuntu, Debian, Fedora, RHEL, Rocky, AlmaLinux, and Oracle Linux. CentOS systems with DNF are also recognized. **Pilot this release on a noncritical machine from each OS family.** Distro support is an implementation target, not evidence of runtime validation on all versions.
 
+## Tested distributions
+
+The following distributions have been **successfully tested on live hosts** with NightyNight v2. These tests establish functionality on the specific OS versions shown, not certification for every release or configuration.
+
+| Distribution | Version | Verified functionality | Result |
+| --- | --- | --- | --- |
+| Ubuntu | 24.04 LTS | Installation and migration from cron; APT dry run and real update run; reboot status; JSON status; systemd timer; logrotate; timezone selection; replacement of `apt-daily-upgrade.timer` | **Passed** |
+| Fedora | 44 (DNF5) | Installation and migration; DNF dry run and real update run; offline transaction detection and recovery after manual cleanup; reboot status; JSON status; systemd timer; logrotate; timezone selection | **Passed** |
+| Red Hat Enterprise Linux (RHEL) | 9 (DNF4) | Installation; real DNF package upgrade (verified successful in DNF history); reboot detection via `dnf needs-restarting -r`; JSON status; systemd timer; logrotate; timezone selection | **Passed** |
+
+**Not yet live-tested:** Debian, Rocky Linux, AlmaLinux, Oracle Linux, and CentOS. These remain supported targets, but should be tested on noncritical systems before production deployment.
+
+**RHEL test notes:** An initial run was blocked by Google Chrome's repository signing key; refreshing the applicable Google key resolved RPM verification. The first completed update run then reported a reboot-check failure because the script did not recognize DNF4's `dnf needs-restarting -r`. The corrected NightyNight engine was subsequently tested successfully with exit code `0` and `reboot_required: true`. An SSH connection also dropped during the large package update, so maintenance windows remain important.
+
 ## Files
 
 | File | Purpose |
