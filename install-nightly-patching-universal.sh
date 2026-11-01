@@ -71,16 +71,44 @@ else
   # DNF 4/5: refresh metadata and install available packages. Do not run autoremove.
   # obsoletes=False reduces automatic replacement/removal, but does not guarantee
   # an upgrade will never remove an RPM. Review transactions on critical hosts.
-  dnf --refresh -y --setopt=obsoletes=False upgrade
-  if command -v needs-restarting >/dev/null 2>&1; then
-    if needs-restarting -r; then
-      echo 'No reboot indicated by needs-restarting'
-    else
-      echo 'REBOOT MAY BE REQUIRED (no automatic reboot)'
-    fi
-  else
-    echo 'Reboot status unavailable: needs-restarting not installed'
+  # Do not invalidate a scheduled offline OS update (common on Fedora desktops).
+  if [[ -e /system-update || -e /etc/system-update ]]; then
+    echo 'WARNING: Pending systemd offline update detected; skipping online DNF upgrade.'
+    exit 0
   fi
+  if command -v dnf5 >/dev/null 2>&1; then
+    offline_state=/usr/lib/sysimage/libdnf5/offline/offline-transaction-state.toml
+    if [[ -f $offline_state ]]; then
+      # A prepared offline transaction can exist without /system-update yet.
+      # Treat an unrecognized state conservatively; do not invalidate it.
+      offline_phase=$(sed -n 's/^[[:space:]]*status[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$offline_state" | head -n 1)
+      if [[ -z "$offline_phase" || "$offline_phase" != "none" ]]; then
+        echo "WARNING: DNF5 offline transaction state present (status: ${offline_phase:-unknown}); skipping online upgrade."
+        exit 0
+      fi
+    fi
+  fi
+  dnf --refresh -y --setopt=obsoletes=False upgrade
+  # DNF5 exposes reboot hints as a subcommand (not a standalone executable).
+  # DNF4 commonly provides needs-restarting via dnf-utils/plugins-core.
+  if command -v dnf5 >/dev/null 2>&1; then
+    reboot_rc=0
+    dnf5 needs-restarting || reboot_rc=$?
+  elif command -v needs-restarting >/dev/null 2>&1; then
+    reboot_rc=0
+    needs-restarting -r || reboot_rc=$?
+  elif dnf needs-restarting --help >/dev/null 2>&1; then
+    reboot_rc=0
+    dnf needs-restarting -r || reboot_rc=$?
+  else
+    reboot_rc=99
+  fi
+  case "$reboot_rc" in
+    0) echo 'No reboot required according to DNF' ;;
+    1) echo 'REBOOT REQUIRED (no automatic reboot)' ;;
+    99) echo 'WARNING: Reboot status unavailable; needs-restarting is missing' ;;
+    *) echo "WARNING: Reboot check failed (exit code $reboot_rc)" ;;
+  esac
   # Exit codes from check-update are 0 (none), 100 (available), or errors.
   dnf check-update || status=$?
   if [[ ${status:-0} -ne 0 && ${status:-0} -ne 100 ]]; then
