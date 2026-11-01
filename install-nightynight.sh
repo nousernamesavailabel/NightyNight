@@ -130,7 +130,13 @@ get_conf() { sed -n "s/^$1=//p" "$CFG_DIR/nightynight.conf" | tail -n 1; }
 H=$(get_conf PATCH_HOUR); M=$(get_conf PATCH_MINUTE); J=$(get_conf RANDOM_DELAY_MINUTES)
 H=${H:-3}; M=${M:-0}; J=${J:-30}
 P=$(get_conf PERSISTENT_TIMER); P=${P:-true}
-DISABLE=$(get_conf DISABLE_NATIVE_UPDATERS); DISABLE=${DISABLE:-false}
+# Select one updater ownership policy. Legacy DISABLE_NATIVE_UPDATERS=true maps to replace.
+POLICY=$(get_conf NATIVE_UPDATER_POLICY)
+if [[ -z $POLICY ]]; then
+  LEGACY=$(get_conf DISABLE_NATIVE_UPDATERS)
+  if [[ $LEGACY == true ]]; then POLICY=replace; else POLICY=ask; fi
+fi
+case "$POLICY" in ask|replace|preserve) : ;; *) echo "Invalid native updater policy: $POLICY" >&2; exit 1 ;; esac
 MAX=$(get_conf MAX_RUNTIME_MINUTES); MAX=${MAX:-120}
 # Normalize to integer to avoid leading zero parsing and systemd unit injection.
 H=$((10#$H)); M=$((10#$M)); J=$((10#$J)); MAX=$((10#$MAX))
@@ -194,14 +200,79 @@ if command -v crontab >/dev/null 2>&1; then
   fi
   rm -f "$current"
 fi
-if [[ $DISABLE == true ]]; then
-  echo 'Explicitly disabling known native updater timers.'
-  for unit in apt-daily.timer apt-daily-upgrade.timer dnf-automatic.timer dnf-automatic-install.timer dnf5-automatic.timer; do
-    systemctl list-unit-files "$unit" --no-legend 2>/dev/null | grep -q "^$unit" && systemctl disable --now "$unit" || :
+# Only disable automatic package INSTALLATION timers, never repository-cache timers.
+# Disabling a timer does not stop any package installation already in progress.
+manage_native_updaters() {
+  local choice unit service state file output
+  local -a units=()
+  if [[ $POLICY == ask ]]; then
+    if [[ -t 0 ]]; then
+      echo
+      echo 'Native automatic-update coordination:'
+      echo '  1) Replace native automatic-install timers with NightyNight [recommended for dedicated servers]'
+      echo '  2) Preserve native automatic-update timers [default]'
+      read -r -p 'Choose [1-2, default 2]: ' choice || choice=2
+      case "${choice:-2}" in 1) POLICY=replace ;; 2) POLICY=preserve ;; *) echo 'Invalid choice; no timers changed.' >&2; exit 1 ;; esac
+    else
+      POLICY=preserve
+      echo 'Noninteractive install: preserving native timers (set NIGHTYNIGHT_UPDATER_POLICY=replace to opt in).'
+    fi
+  fi
+  if [[ -v NIGHTYNIGHT_UPDATER_POLICY ]]; then
+    POLICY=$NIGHTYNIGHT_UPDATER_POLICY
+  fi
+  case "$POLICY" in replace|preserve) : ;; *) echo "Invalid NIGHTYNIGHT_UPDATER_POLICY: $POLICY" >&2; exit 1 ;; esac
+  if [[ $POLICY == preserve ]]; then
+    echo 'Native automatic-install timers preserved; they may run independently of NightyNight.'
+    return 0
+  fi
+  if [[ $PKG_FAMILY == apt ]]; then
+    units=(apt-daily-upgrade.timer)
+  else
+    units=(dnf-automatic.timer dnf-automatic-install.timer dnf-automatic-download.timer dnf-automatic-notifyonly.timer dnf5-automatic.timer dnf5-automatic-install.timer)
+  fi
+  # Guard before making any changes: do not interfere with an in-progress update.
+  local -a present=() changed=()
+  for unit in "${units[@]}"; do
+    if systemctl list-unit-files --no-legend --no-pager "$unit" 2>/dev/null | awk '{print $1}' | grep -Fxq "$unit"; then
+      present+=("$unit")
+      service=${unit%.timer}.service
+      if systemctl is-active --quiet "$service"; then
+        echo "ERROR: $service is running. Retry after the update finishes; no native timers changed." >&2
+        return 1
+      fi
+    fi
   done
-else
-  echo 'Native updater timers preserved (default). They may run independently of NightyNight.'
-fi
+  file="/var/backups/nightynight/native-updaters.$STAMP.tsv"
+  : > "$file"
+  chmod 600 "$file"
+  for unit in "${present[@]}"; do
+    state=$(systemctl is-enabled "$unit" 2>/dev/null || true)
+    printf '%s\t%s\n' "$unit" "$state" >> "$file"
+  done
+  for unit in "${present[@]}"; do
+    if systemctl disable --now "$unit"; then
+      changed+=("$unit")
+      echo "Disabled native updater timer: $unit"
+    else
+      echo "ERROR: could not disable $unit; attempting to restore earlier timer states." >&2
+      local prev saved
+      for prev in "${changed[@]}"; do
+        saved=$(awk -F '\t' -v n="$prev" '$1 == n {print $2}' "$file")
+        case "$saved" in enabled|enabled-runtime) systemctl enable --now "$prev" || : ;; esac
+      done
+      return 1
+    fi
+  done
+  echo "Native updater policy: replace. Previous timer states saved to $file"
+  echo 'Note: desktop graphical/offline updaters and other custom automation are not disabled.'
+}
+PKG_FAMILY=dnf
+case "$ID" in ubuntu|debian) PKG_FAMILY=apt ;; esac
+# Explicit environment override is honored even if configuration is preserved from v1.
+if [[ -v NIGHTYNIGHT_UPDATER_POLICY ]]; then POLICY=$NIGHTYNIGHT_UPDATER_POLICY; fi
+manage_native_updaters
+
 choose_timezone
 systemctl daemon-reload
 systemctl enable --now nightynight.timer

@@ -25,7 +25,7 @@ while IFS= read -r ln || [[ -n $ln ]]; do
   [[ $ln =~ ^([A-Z_]+)=(.*)$ ]] || { echo "Invalid config line: $ln" >&2; exit 3; }
   k=${BASH_REMATCH[1]}; v=${BASH_REMATCH[2]}
   case "$k" in
-    PATCH_HOUR|PATCH_MINUTE|RANDOM_DELAY_MINUTES|PERSISTENT_TIMER|MIN_FREE_SPACE_MB|MAX_RUNTIME_MINUTES|UPDATE_MODE|EXCLUDE_PACKAGES|EXCLUDE_KERNEL|ALLOW_PACKAGE_REMOVALS|CHECK_OFFLINE_UPDATES|AUTO_REBOOT|LOG_RETENTION_DAYS|NOTIFY_ON_FAILURE|NOTIFY_ON_REBOOT|NOTIFY_EMAIL|DISABLE_NATIVE_UPDATERS) cfg[$k]=$v ;;
+    PATCH_HOUR|PATCH_MINUTE|RANDOM_DELAY_MINUTES|PERSISTENT_TIMER|MIN_FREE_SPACE_MB|MAX_RUNTIME_MINUTES|UPDATE_MODE|EXCLUDE_PACKAGES|EXCLUDE_KERNEL|ALLOW_PACKAGE_REMOVALS|CHECK_OFFLINE_UPDATES|AUTO_REBOOT|LOG_RETENTION_DAYS|NOTIFY_ON_FAILURE|NOTIFY_ON_REBOOT|NOTIFY_EMAIL|DISABLE_NATIVE_UPDATERS|NATIVE_UPDATER_POLICY) cfg[$k]=$v ;;
     *) echo "Unknown config key: $k" >&2; exit 3 ;;
   esac
 done < "$CONFIG"
@@ -47,6 +47,7 @@ if [[ $(get UPDATE_MODE all) == security ]]; then
   exit 3
 fi
 [[ $(get ALLOW_PACKAGE_REMOVALS false) == false ]] || { echo 'ALLOW_PACKAGE_REMOVALS=true is not supported in v2.' >&2; exit 3; }
+case "$(get NATIVE_UPDATER_POLICY ask)" in ask|preserve|replace) : ;; *) echo 'Invalid NATIVE_UPDATER_POLICY' >&2; exit 3 ;; esac
 if [[ $ACTION == check-config ]]; then echo 'Configuration OK'; exit 0; fi
 
 mkdir -p "$STATE_DIR"

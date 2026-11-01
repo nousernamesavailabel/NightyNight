@@ -19,6 +19,22 @@ Automated nightly Linux package patching for Ubuntu, Debian, Fedora, RHEL, Rocky
 - For optional email notifications, configure a functioning local `mail` command and a mail transport. No SMTP credentials are stored by NightyNight.
 - On APT systems, the `APT::Update::Error-Mode=any` behavior requires a suitably recent apt (supported by modern Ubuntu/Debian versions).
 
+## Native updater coordination
+
+The installer offers a choice:
+
+- **Replace**: disables known native *automatic-install* timers (`apt-daily-upgrade.timer` on Ubuntu/Debian; common `dnf-automatic*`/`dnf5-automatic*` timers on DNF systems). Leaves `apt-daily.timer` and `dnf-makecache.timer` enabled. Before changing timers, checks whether corresponding update services are running; if they are, installation stops before modifying the native timers. Records previous timer enabled states in `/var/backups/nightynight/native-updaters.<timestamp>.tsv`. Attempts to restore already-changed timer states if a later disable fails.
+- **Preserve**: does not modify native timers. Choose if an external patching workflow owns upgrades.
+- **Ask**: prompts on interactive installations and preserves on noninteractive installations.
+
+For noninteractive installs, set `NIGHTYNIGHT_UPDATER_POLICY=replace` or `preserve` explicitly, or set `NATIVE_UPDATER_POLICY` in `/etc/nightynight/nightynight.conf` and rerun the installer. Example:
+
+```bash
+sudo env NIGHTYNIGHT_UPDATER_POLICY=replace ./install-nightynight.sh
+```
+
+The installer only detects a known list of timer unit names. Review other automated update mechanisms and desktop offline transactions separately. It never stops an already-running package upgrade. Undo changes manually using the saved previous states; native timers are **not** automatically re-enabled on uninstall.
+
 ## Install or upgrade
 
 Keep the four files in one directory, then:
@@ -44,7 +60,7 @@ sudo env NIGHTYNIGHT_TIMEZONE=keep ./install-nightynight.sh
 
 Timezone selections are validated against `timedatectl list-timezones` before applying. This changes the **whole server timezone**, including other local-time scheduled jobs and log timestamps—not only NightyNight. It does not alter the underlying clock or require a reboot. The systemd timer uses local server time and automatically accounts for DST. Running the installer again defaults to retaining the then-current timezone.
 
-**Important:** This installer changes the scheduling mechanism from cron to systemd. It removes only known NightyNight cron references; review custom cron entries separately. By default it **does not disable** native APT/DNF automatic update services. If the server already runs native unattended updates, choose which automation should own patching before production deployment. If you explicitly set `DISABLE_NATIVE_UPDATERS=true`, the installer disables selected known update timers; other update mechanisms may still exist.
+**Important:** This installer changes the scheduling mechanism from cron to systemd. It removes only known NightyNight cron references; review custom cron entries separately. The installer now offers **native updater coordination**. With `NATIVE_UPDATER_POLICY=ask` (default), interactive installation asks whether to replace native automatic-install timers (option 1) or preserve them (default option 2). Noninteractive installation preserves them unless explicitly configured. This is an installer-time action, not a per-night enforcement policy. It does not disable metadata-refresh timers, such as `apt-daily.timer` or `dnf-makecache.timer`, and it does not control desktop graphical/offline update schedulers.
 
 ### First-time test
 
@@ -81,7 +97,8 @@ Edit `/etc/nightynight/nightynight.conf` (root-only), then rerun `sudo ./install
 | `LOG_RETENTION_DAYS` | `14` | Number of daily rotated log files |
 | `NOTIFY_ON_FAILURE`, `NOTIFY_ON_REBOOT` | `false` | Optional emails, if `mail` is configured |
 | `NOTIFY_EMAIL` | empty | Recipient (one address recommended) |
-| `DISABLE_NATIVE_UPDATERS` | `false` | Opt-in to disabling selected existing updater timers at install time |
+| `NATIVE_UPDATER_POLICY` | `ask` | `ask`, `preserve`, or `replace` for competing native automatic-install timers; applied when installing |
+| `DISABLE_NATIVE_UPDATERS` | `false` | Legacy setting; use `NATIVE_UPDATER_POLICY` for new installs |
 
 Settings are plain `KEY=value` lines; **do not use shell quotes, variable expansions, or inline comments**. Configuration is parsed as data. Keep the file root-owned with mode `0600`.
 
